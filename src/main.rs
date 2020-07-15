@@ -1,18 +1,30 @@
 extern crate clap;
-use clap::{Arg, App};
-use url::Url;
+//extern crate tokio;
+extern crate url;
+extern crate num;
+extern crate reqwest;
 
-#[derive(Debug)]
+use clap::{Arg, App};
+//use tokio::prelude::*;
+use url::Url;
+use num::Integer;
+use reqwest::{blocking, Error};
+
+use std::thread;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone)]
 enum Engine {
     Meilisearch(Url),
     Typesense(Url),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StressTestParams {
-    queries_per_sec: u16,
-    bytes_per_sec: u32,
-    threads: u16,
+    queries_total: u16,
+    bytes_total: u32,
+    threads_number: u16,
 }
 
 #[derive(Debug)]
@@ -22,20 +34,75 @@ enum Action {
     Purge,
 }
 
-fn ping(engine: Engine) {
-    print!("ping {:?}", engine);
+fn handle_ping(engine: Engine) {
+    println!(">>> Pinging {:?}", engine);
+    match ping(engine) {
+        Ok(_) => println!("Pinging successfully!"),
+        Err(e) => println!("Ping failed: {:?}", e),
+    };
 }
 
-fn purge(engine: Engine) {
+fn ping(engine: Engine) -> Result<String, Error> {
+    let ping_dest = match engine {
+        Engine::Meilisearch(url) => { 
+            url.join("/indexes").unwrap()
+        },
+        Engine::Typesense(url) => {
+            url.join("/health").unwrap()
+        },
+        _ => panic!("Unsupported engine"),
+    };
+    let response = reqwest::blocking::get(ping_dest)?.text()?;
+    Ok(response)
+}
+
+fn handle_purge(engine: Engine) {
     print!("purge {:?}", engine);
 }
 
-fn stress_test(engine: Engine, stress_params: StressTestParams) {
-    print!("stress_test e: {:?}, p: {:?}", engine, stress_params);
+fn handle_stress_test(engine: Engine, stress_params: StressTestParams) {
+    assert!(stress_params.threads_number != 0, "Given threads number is 0");
+    assert!(stress_params.queries_total != 0, "Given queries number is 0");
+    assert!(stress_params.bytes_total != 0, "Given bytes number is 0");
+    
+    println!(" >>> Stress testing\nSearch engine: {:?}\nQueries: {}\nBytes: {}\nThreads number: {}", 
+        engine, stress_params.queries_total, stress_params.bytes_total, stress_params.threads_number);
+    let mut threads = vec![];
+    println!(" >>> Beginning...\nLaunching {} stress testing threads", stress_params.threads_number);
+    let start_ts = Instant::now();
+    for t in 0..stress_params.threads_number {
+        let engine_thread_local = engine.clone();
+        let mut stress_params_thread_local = StressTestParams{
+            queries_total: (stress_params.queries_total - 1).div_floor(&(stress_params.threads_number)) + 1, // divide with ceiling
+            bytes_total: (stress_params.bytes_total - 1).div_floor(&(stress_params.threads_number as u32)) + 1,
+            threads_number: 1,
+        };
+        threads.push(
+            thread::spawn(move || thread_stress_test(t, engine_thread_local, stress_params_thread_local))
+        );    
+    }
+    let mut unfinished_threads_cnt = stress_params.threads_number;
+    let mut threads_total_time_ms = 0;
+    for thread in threads {
+        if let Ok(duration) = thread.join() {
+            unfinished_threads_cnt -= 1;
+            threads_total_time_ms += duration;
+        }
+    }
+    let test_duration = start_ts.elapsed();
+    println!(" >>> Stress testing is done!\nSuccessfully finished threads: {}\nUnsuccessfully finished threads: {}", 
+        stress_params.threads_number - unfinished_threads_cnt, unfinished_threads_cnt);
+    println!("Test duration: {} ms\nThreads work duration: {} ms", test_duration.as_millis(), threads_total_time_ms);
 }
 
-fn send_query() {
-
+fn thread_stress_test(thread_id: u16, engine: Engine, stress_params: StressTestParams) -> u128 {
+    println!("Thread <{}> testing by sending {} queries ({} bytes total)", 
+        thread_id, stress_params.queries_total, stress_params.bytes_total);
+    let start_ts = Instant::now();
+    thread::sleep(Duration::from_secs(2));
+    let working_time_ms = start_ts.elapsed().as_millis();
+    println!("Thread <{}> Finished", thread_id);
+    working_time_ms
 }
 
 fn main() {
@@ -47,38 +114,26 @@ fn main() {
             .possible_values(&["meilisearch", "typesense"])
             .about(concat!("Selected server to interact with ", 
                           "(it should be launched separetely)")))
-        // .arg(Arg::with_name("typesense")
-        //     .about(concat!("Selected server is running Typesense engine ", 
-        //                   "(it should be launched separetely)")))
-        // .group(ArgGroup::with_name("engine")
-        //     .args(&["meilisearch", "typesense"])
-        //     .required(true))
-
         .arg(Arg::with_name("alternative_action")
             .possible_values(&["ping", "PURGE"])
             .about(concat!("An action instead of stress testing the engine ",
                         "(ping to test connection, PURGE to delete all the data from server))")))
-        // .arg(Arg::with_name("PURGE")
-        //     .about(concat!("Instead of testing the engine, its data will be completely deleted ",
-        //                 "(helps to make a clean test)")))
-        // .group(ArgGroup::with_name("action")
-        //     .args(&["ping", "PURGE"]))
         // flags
-        .arg(Arg::with_name("queries_per_sec")
+        .arg(Arg::with_name("queries_total")
             .short('q')
             .long("queries")
             .takes_value(true)
-            .value_name("Q_PER_SEC")
+            .value_name("QUERIES")
             .default_value("10")
-            .about("How many queries to send to the selected engine per second"))
-        .arg(Arg::with_name("bytes_per_sec")
+            .about("How many queries to send to the selected engine"))
+        .arg(Arg::with_name("bytes_total")
             .short('b')
             .long("bytes")
             .takes_value(true)
-            .value_name("B_PER_SEC")
+            .value_name("BYTES")
             .default_value("1024")
-            .about(concat!("How many bytes to send to the selected engine per second on average ",
-                          "(each query sends bytes from formula: BYTES_PER_SEC/QUERIES_PER_SEC)")))
+            .about(concat!("How many bytes to send to the selected engine (approx)",
+                          "(each query sends bytes from formula: bytes_total/queries_total)")))
         .arg(Arg::with_name("engine_url")
             .short('u')
             .long("url")
@@ -120,21 +175,21 @@ fn main() {
     };
 
     match matches.value_of("alternative_action") {
-        Some("ping") => ping(engine),
-        Some("PURGE") => purge(engine),
-        None => stress_test(engine, StressTestParams {
-            queries_per_sec: matches.value_of("queries_per_sec")
-                .expect("Improper config: queries per sec")
+        Some("ping") => handle_ping(engine),
+        Some("PURGE") => handle_purge(engine),
+        None => handle_stress_test(engine, StressTestParams {
+            queries_total: matches.value_of("queries_total")
+                .expect("Improper config: queries")
                 .parse()
-                .expect("--queries value is not a number"),
-            bytes_per_sec: matches.value_of("bytes_per_sec")
-                .expect("Improper config: bytes per sec")
+                .expect("--queries value is not an unsigned number"),
+            bytes_total: matches.value_of("bytes_total")
+                .expect("Improper config: bytes")
                 .parse().
-                expect("--bytes value is not a number"),
-            threads: matches.value_of("threads")
+                expect("--bytes value is not an unsigned number"),
+            threads_number: matches.value_of("threads")
                 .expect("Improper config: threads number")
                 .parse()
-                .expect("--threads value is not a number"),
+                .expect("--threads value is not an unsigned number"),
         }),
         _ => panic!("Improper config: alternative action")
     };
