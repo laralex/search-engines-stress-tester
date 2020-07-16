@@ -3,15 +3,16 @@ extern crate clap;
 extern crate url;
 extern crate num;
 extern crate reqwest;
+extern crate serde_json;
 
 use clap::{Arg, App};
 //use tokio::prelude::*;
 use url::Url;
 use num::Integer;
-use reqwest::{blocking, Error};
+use reqwest::{Error, StatusCode};
+use serde::{Deserialize};
 
 use std::thread;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
@@ -27,17 +28,10 @@ struct StressTestParams {
     threads_number: u16,
 }
 
-#[derive(Debug)]
-enum Action {
-    StressTest(StressTestParams),
-    Ping,
-    Purge,
-}
-
 fn handle_ping(engine: Engine) {
     println!(">>> Pinging {:?}", engine);
     match ping(engine) {
-        Ok(_) => println!("Pinging successfully!"),
+        Ok(response) => println!("Pinged successfully!"),
         Err(e) => println!("Ping failed: {:?}", e),
     };
 }
@@ -57,7 +51,52 @@ fn ping(engine: Engine) -> Result<String, Error> {
 }
 
 fn handle_purge(engine: Engine) {
-    print!("purge {:?}", engine);
+    println!(">>> Purging all the data from {:?}", engine);
+    match purge(engine) {
+        Ok(_) => println!("Purge is done!"),
+        Err(e) => println!("Purge failed: {:?}", e),
+    };
+}
+
+fn purge(engine: Engine) -> Result<(), Error> {
+    match engine {
+        Engine::Meilisearch(url) => purge_meilisearch(url)?,
+        Engine::Typesense(url) => purge_typesense(url)?,
+        _ => panic!("Unsupported engine"),
+    }
+    Ok ( () )
+}
+
+#[derive(Deserialize)]
+struct MeilisearchIndex
+{
+    uid: String,
+}
+
+fn purge_meilisearch(url: Url) -> Result<(), Error> {
+    let indexes_resourse = url.join("indexes/").unwrap();
+    let indexes : Vec<MeilisearchIndex> = reqwest::blocking::get(indexes_resourse.as_str())?.json()?;
+    let client = reqwest::blocking::Client::new();
+    indexes.iter().for_each(|index| {
+        let index_resourse = indexes_resourse.join(&index.uid).unwrap();
+        match client.delete(index_resourse.as_str()).send() {
+            Ok(response) => {
+                match response.status() {
+                    StatusCode::NO_CONTENT => println!("Deleted index: {}", index_resourse),
+                    StatusCode::NOT_FOUND => println!("Cannot find index: {}", index_resourse),
+                    status_code => println!("Unknown response {:?} from index: {}", status_code, index_resourse)
+                };
+            },
+            Err(e) => {
+                println!("Failed to send request to index {}", index_resourse);
+            },
+        };
+    });
+    Ok( () )
+}
+
+fn purge_typesense(url: Url) -> Result<(), Error> {
+    Ok( () )
 }
 
 fn handle_stress_test(engine: Engine, stress_params: StressTestParams) {
