@@ -1,148 +1,11 @@
-extern crate clap;
-//extern crate tokio;
-extern crate url;
-extern crate num;
-extern crate reqwest;
-extern crate serde_json;
-
 use clap::{Arg, App};
-//use tokio::prelude::*;
-use url::Url;
-use num::Integer;
-use reqwest::{Error, StatusCode};
-use serde::{Deserialize};
+use reqwest::Url;
 
-use std::thread;
-use std::time::{Duration, Instant};
+use std::path::Path;
 
-#[derive(Debug, Clone)]
-enum Engine {
-    Meilisearch(Url),
-    Typesense(Url),
-}
-
-#[derive(Debug, Clone)]
-struct StressTestParams {
-    queries_total: u16,
-    bytes_total: u32,
-    threads_number: u16,
-}
-
-fn handle_ping(engine: Engine) {
-    println!(">>> Pinging {:?}", engine);
-    match ping(engine) {
-        Ok(response) => println!("Pinged successfully!"),
-        Err(e) => println!("Ping failed: {:?}", e),
-    };
-}
-
-fn ping(engine: Engine) -> Result<String, Error> {
-    let ping_dest = match engine {
-        Engine::Meilisearch(url) => { 
-            url.join("/indexes").unwrap()
-        },
-        Engine::Typesense(url) => {
-            url.join("/health").unwrap()
-        },
-        _ => panic!("Unsupported engine"),
-    };
-    let response = reqwest::blocking::get(ping_dest)?.text()?;
-    Ok(response)
-}
-
-fn handle_purge(engine: Engine) {
-    println!(">>> Purging all the data from {:?}", engine);
-    match purge(engine) {
-        Ok(_) => println!("Purge is done!"),
-        Err(e) => println!("Purge failed: {:?}", e),
-    };
-}
-
-fn purge(engine: Engine) -> Result<(), Error> {
-    match engine {
-        Engine::Meilisearch(url) => purge_meilisearch(url)?,
-        Engine::Typesense(url) => purge_typesense(url)?,
-        _ => panic!("Unsupported engine"),
-    }
-    Ok ( () )
-}
-
-#[derive(Deserialize)]
-struct MeilisearchIndex
-{
-    uid: String,
-}
-
-fn purge_meilisearch(url: Url) -> Result<(), Error> {
-    let indexes_resourse = url.join("indexes/").unwrap();
-    let indexes : Vec<MeilisearchIndex> = reqwest::blocking::get(indexes_resourse.as_str())?.json()?;
-    let client = reqwest::blocking::Client::new();
-    indexes.iter().for_each(|index| {
-        let index_resourse = indexes_resourse.join(&index.uid).unwrap();
-        match client.delete(index_resourse.as_str()).send() {
-            Ok(response) => {
-                match response.status() {
-                    StatusCode::NO_CONTENT => println!("Deleted index: {}", index_resourse),
-                    StatusCode::NOT_FOUND => println!("Cannot find index: {}", index_resourse),
-                    status_code => println!("Unknown response {:?} from index: {}", status_code, index_resourse)
-                };
-            },
-            Err(e) => {
-                println!("Failed to send request to index {}", index_resourse);
-            },
-        };
-    });
-    Ok( () )
-}
-
-fn purge_typesense(url: Url) -> Result<(), Error> {
-    Ok( () )
-}
-
-fn handle_stress_test(engine: Engine, stress_params: StressTestParams) {
-    assert!(stress_params.threads_number != 0, "Given threads number is 0");
-    assert!(stress_params.queries_total != 0, "Given queries number is 0");
-    assert!(stress_params.bytes_total != 0, "Given bytes number is 0");
-    
-    println!(" >>> Stress testing\nSearch engine: {:?}\nQueries: {}\nBytes: {}\nThreads number: {}", 
-        engine, stress_params.queries_total, stress_params.bytes_total, stress_params.threads_number);
-    let mut threads = vec![];
-    println!(" >>> Beginning...\nLaunching {} stress testing threads", stress_params.threads_number);
-    let start_ts = Instant::now();
-    for t in 0..stress_params.threads_number {
-        let engine_thread_local = engine.clone();
-        let mut stress_params_thread_local = StressTestParams{
-            queries_total: (stress_params.queries_total - 1).div_floor(&(stress_params.threads_number)) + 1, // divide with ceiling
-            bytes_total: (stress_params.bytes_total - 1).div_floor(&(stress_params.threads_number as u32)) + 1,
-            threads_number: 1,
-        };
-        threads.push(
-            thread::spawn(move || thread_stress_test(t, engine_thread_local, stress_params_thread_local))
-        );    
-    }
-    let mut unfinished_threads_cnt = stress_params.threads_number;
-    let mut threads_total_time_ms = 0;
-    for thread in threads {
-        if let Ok(duration) = thread.join() {
-            unfinished_threads_cnt -= 1;
-            threads_total_time_ms += duration;
-        }
-    }
-    let test_duration = start_ts.elapsed();
-    println!(" >>> Stress testing is done!\nSuccessfully finished threads: {}\nUnsuccessfully finished threads: {}", 
-        stress_params.threads_number - unfinished_threads_cnt, unfinished_threads_cnt);
-    println!("Test duration: {} ms\nThreads work duration: {} ms", test_duration.as_millis(), threads_total_time_ms);
-}
-
-fn thread_stress_test(thread_id: u16, engine: Engine, stress_params: StressTestParams) -> u128 {
-    println!("Thread <{}> testing by sending {} queries ({} bytes total)", 
-        thread_id, stress_params.queries_total, stress_params.bytes_total);
-    let start_ts = Instant::now();
-    thread::sleep(Duration::from_secs(2));
-    let working_time_ms = start_ts.elapsed().as_millis();
-    println!("Thread <{}> Finished", thread_id);
-    working_time_ms
-}
+mod actions;
+mod typesense;
+mod meilisearch;
 
 fn main() {
     let matches = App::new(concat!("Load tester for document search engines ", 
@@ -197,6 +60,21 @@ fn main() {
             .default_value("1")
             .about(concat!("Threads number for this app (one thread might not manage ", 
                    "to send all the queries in time, in that case use more threads)")))
+        .arg(Arg::with_name("api_key")
+            .short('k')
+            .long("api-key")
+            .required_if("engine","typesense")
+            .value_name("API_KEY")
+            .takes_value(true)
+            .about("Typesense's API key of the running server"))
+        .arg(Arg::with_name("test_data_path")
+            .short('d')
+            .long("test-data")
+            .required_unless("alternative_action")
+            //.required_if("alternative_action", "")
+            .value_name("PATH")
+            .takes_value(true)
+            .about("Path to a CSV file with stress test data. It will be duplicated up to required size."))
         .get_matches();  
 
     let mut engine_url = Url::parse(matches.value_of("engine_url")
@@ -208,15 +86,18 @@ fn main() {
                 .expect("Engine Port is not a number")))
         .expect("Engine Port is an invalid port number");
     let engine = match matches.value_of("engine") {
-        Some("meilisearch") => Engine::Meilisearch(engine_url),
-        Some("typesense") => Engine::Typesense(engine_url),
+        Some("meilisearch") => actions::Engine::Meilisearch(engine_url),
+        Some("typesense") => actions::Engine::Typesense(engine_url, 
+            matches.value_of("api_key")
+                .expect("Improper config: typesense API key")
+                .to_owned()),
         _ => panic!("Improper config: engine"),
     };
 
     match matches.value_of("alternative_action") {
-        Some("ping") => handle_ping(engine),
-        Some("PURGE") => handle_purge(engine),
-        None => handle_stress_test(engine, StressTestParams {
+        Some("ping") => actions::handle_ping(engine),
+        Some("PURGE") => actions::handle_purge(engine),
+        None => actions::handle_stress_test(engine, actions::StressTestParams {
             queries_total: matches.value_of("queries_total")
                 .expect("Improper config: queries")
                 .parse()
@@ -229,8 +110,19 @@ fn main() {
                 .expect("Improper config: threads number")
                 .parse()
                 .expect("--threads value is not an unsigned number"),
+            data_path: { 
+                let path = Path::new(matches
+                        .value_of("test_data_path")
+                        .expect("Improper config: test_data_path"));
+                if let None = path.file_name() {
+                    panic!("--test-data is not a file path");
+                }
+                if !path.exists() {
+                    panic!("--test-data path doesn't exist");
+                }
+                path
+            },
         }),
         _ => panic!("Improper config: alternative action")
     };
-    //print!("{:?}", matches);
 }
