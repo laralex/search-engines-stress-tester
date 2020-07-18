@@ -1,5 +1,6 @@
-use clap::{Arg, App};
+use clap::{Arg, App, ArgMatches};
 use reqwest::Url;
+use tokio::prelude::*;
 
 use std::path::Path;
 
@@ -7,8 +8,8 @@ mod actions;
 mod typesense;
 mod meilisearch;
 
-fn main() {
-    let matches = App::new(concat!("Load tester for document search engines ", 
+fn parse_args() -> ArgMatches {
+    App::new(concat!("Load tester for document search engines ", 
                                        "(Meilisearch and Typesense)"))
         .version(env!("CARGO_PKG_VERSION"))
         //options
@@ -52,14 +53,14 @@ fn main() {
             .default_value_if("engine", Some("typesense"), "8108")
             .about(concat!("Selected search engine's port number ", 
                           "[default: 7700 for Meilisearch, 8108 for Typesense]")))
-        .arg(Arg::with_name("threads")
-            .short('t')
-            .long("threads")
-            .takes_value(true)
-            .value_name("THREADS")
-            .default_value("1")
-            .about(concat!("Threads number for this app (one thread might not manage ", 
-                   "to send all the queries in time, in that case use more threads)")))
+        // .arg(Arg::with_name("threads")
+        //     .short('t')
+        //     .long("threads")
+        //     .takes_value(true)
+        //     .value_name("THREADS")
+        //     .default_value("1")
+        //     .about(concat!("Threads number for this app (one thread might not manage ", 
+        //            "to send all the queries in time, in that case use more threads)")))
         .arg(Arg::with_name("api_key")
             .short('k')
             .long("api-key")
@@ -75,7 +76,11 @@ fn main() {
             .value_name("PATH")
             .takes_value(true)
             .about("Path to a CSV file with stress test data. It will be duplicated up to required size."))
-        .get_matches();  
+        .get_matches()
+}
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let matches = parse_args();  
 
     let mut engine_url = Url::parse(matches.value_of("engine_url")
             .expect("Improper config: engine url"))
@@ -85,6 +90,7 @@ fn main() {
                 .parse()
                 .expect("Engine Port is not a number")))
         .expect("Engine Port is an invalid port number");
+        
     let engine = match matches.value_of("engine") {
         Some("meilisearch") => actions::Engine::Meilisearch(engine_url),
         Some("typesense") => actions::Engine::Typesense(engine_url, 
@@ -95,8 +101,8 @@ fn main() {
     };
 
     match matches.value_of("alternative_action") {
-        Some("ping") => actions::handle_ping(engine),
-        Some("PURGE") => actions::handle_purge(engine),
+        Some("ping") => actions::handle_ping(engine).await,
+        Some("PURGE") => actions::handle_purge(engine).await,
         None => actions::handle_stress_test(engine, actions::StressTestParams {
             queries_total: matches.value_of("queries_total")
                 .expect("Improper config: queries")
@@ -106,10 +112,10 @@ fn main() {
                 .expect("Improper config: bytes")
                 .parse().
                 expect("--bytes value is not an unsigned number"),
-            threads_number: matches.value_of("threads")
-                .expect("Improper config: threads number")
-                .parse()
-                .expect("--threads value is not an unsigned number"),
+            // threads_number: matches.value_of("threads")
+            //     .expect("Improper config: threads number")
+            //     .parse()
+            //     .expect("--threads value is not an unsigned number"),
             data_path: { 
                 let path = Path::new(matches
                         .value_of("test_data_path")
@@ -122,7 +128,9 @@ fn main() {
                 }
                 path
             },
-        }),
+        })
+        .await,
         _ => panic!("Improper config: alternative action")
     };
+    Ok( () )
 }
