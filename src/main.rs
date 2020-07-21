@@ -1,12 +1,15 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
 use clap::{Arg, App, ArgMatches};
 use reqwest::Url;
-use tokio::prelude::*;
 
 use std::path::Path;
 
 mod actions;
 mod typesense;
 mod meilisearch;
+mod data;
 
 fn parse_args() -> ArgMatches {
     App::new(concat!("Load tester for document search engines ", 
@@ -19,6 +22,7 @@ fn parse_args() -> ArgMatches {
                           "(it should be launched separetely)")))
         .arg(Arg::with_name("alternative_action")
             .possible_values(&["ping", "PURGE"])
+            .conflicts_with_all(&["queries_total", "initial_documents", "test_data_path"])
             .about(concat!("An action instead of stress testing the engine ",
                         "(ping to test connection, PURGE to delete all the data from server))")))
         // flags
@@ -29,14 +33,21 @@ fn parse_args() -> ArgMatches {
             .value_name("QUERIES")
             .default_value("10")
             .about("How many queries to send to the selected engine"))
-        .arg(Arg::with_name("bytes_total")
-            .short('b')
-            .long("bytes")
+        .arg(Arg::with_name("initial_documents")
+            .short('i')
+            .long("initial-docs")
             .takes_value(true)
-            .value_name("BYTES")
-            .default_value("1024")
-            .about(concat!("How many bytes to send to the selected engine (approx)",
-                          "(each query sends bytes from formula: bytes_total/queries_total)")))
+            .value_name("DOCUMENTS_NUMBER")
+            .default_value("10000")
+            .about(concat!("How many initial documents to send for a test")))
+        // .arg(Arg::with_name("bytes_total")
+        //     .short('b')
+        //     .long("bytes")
+        //     .takes_value(true)
+        //     .value_name("BYTES")
+        //     .default_value("1024")
+        //     .about(concat!("How many bytes to send to the selected engine (approx)",
+        //                   "(each query sends bytes from formula: bytes_total/queries_total)")))
         .arg(Arg::with_name("engine_url")
             .short('u')
             .long("url")
@@ -108,10 +119,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("Improper config: queries")
                 .parse()
                 .expect("--queries value is not an unsigned number"),
-            bytes_total: matches.value_of("bytes_total")
-                .expect("Improper config: bytes")
-                .parse().
-                expect("--bytes value is not an unsigned number"),
+            initial_documents: matches.value_of("initial_documents")
+                .expect("Improper config: initial_documents")
+                .parse()
+                .expect("--initial-docs value is not an unsigned number"),
+            // bytes_total: matches.value_of("bytes_total")
+            //     .expect("Improper config: bytes")
+            //     .parse().
+            //     expect("--bytes value is not an unsigned number"),
             // threads_number: matches.value_of("threads")
             //     .expect("Improper config: threads number")
             //     .parse()

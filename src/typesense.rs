@@ -1,7 +1,8 @@
 use serde::Deserialize;
-use reqwest::{ StatusCode, Error, Url };
+use reqwest::{ StatusCode, Url };
 
 use std::fmt::Write;
+use std::error::Error; 
 
 #[derive(Deserialize)]
 struct TypesenseCollections
@@ -15,21 +16,22 @@ struct TypesenseCollection
     name: String,
 }
 
-pub fn purge(url: Url, api_key: String) -> Result<String, Error> {
+pub async fn purge(url: Url, api_key: String) -> Result<String, Box<dyn Error>> {
     let all_collections_resourse = url.join("collections/").unwrap();
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::Client::new();
     let all_collections_response = client.get(all_collections_resourse.as_str())
         .header("X-TYPESENSE-API-KEY", api_key)
-        .send()?;
+        .send()
+        .await?;
     let mut log = String::new();
     if all_collections_response.status() != StatusCode::OK {
-        writeln!(log, "Failed to get all collections: {:?}", all_collections_response.text()?);
+        writeln!(log, "Failed to get all collections: {:?}", all_collections_response.text().await?).unwrap();
         return Ok( log );
     }
-    let all_collections : TypesenseCollections = all_collections_response.json()?;
+    let all_collections : TypesenseCollections = all_collections_response.json().await?;
     if let Some(collections) = all_collections.collections {
         collections.iter().for_each(|collection| {
-            writeln!(log, "Deleted collection: {}", collection.name);
+            writeln!(log, "Deleted collection: {}", collection.name).unwrap();
         });
     }
     //println!(all_collections.text()?);
