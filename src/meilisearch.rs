@@ -6,8 +6,8 @@ use reqwest::{StatusCode, Url, Response};
 use rand::seq::{SliceRandom, IteratorRandom};
 use rand::Rng;
 use futures::prelude::*;
-use futures::future::{join_all, ok, err};
-use tokio::time::Instant;
+use futures::future::{join_all, ok, err, select_all};
+use tokio::time::{ Duration, Instant };
 use itertools::Itertools;
 use async_std::{prelude::*, eprintln, eprint, print, println};
 
@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
+use std::collections::LinkedList;
 
 #[derive(Deserialize)]
 struct Index
@@ -26,6 +27,7 @@ struct Index
 pub struct StressTestResult {
     pub all_queries_send_time_ms: u128,
     pub all_queries_receive_time_ms: u128,
+    pub avg_response_time: u128,
 }
 
 pub struct Proxy { 
@@ -42,32 +44,51 @@ impl Proxy {
         }
     }
 
-    async fn make_random_query<'a, I, N>(&self, index_name: N, doc_idx_range: (usize, usize), docs: I, search_queries: &[&'a str]) -> Result<String, Box<dyn Error>>
+    async fn make_random_query<'a, I, N>(&self, index_name: N, doc_idx_range: (usize, usize), docs: I, search_queries: &[&'a str]) -> Result<(serde_json::Value, Duration), Box<dyn Error>>
     where I: IntoIterator<Item=Document<'a>>, I::IntoIter: Clone, N: Deref, N::Target: AsRef<str> {
+        const MAX_LIMIT: usize = 20;
         let mut rng = rand::thread_rng();
         let random_doc_idx = rng.gen_range(doc_idx_range.0, doc_idx_range.1);
-        let random_limit = rng.gen_range(1, 50);
+        let random_limit = rng.gen_range(1, MAX_LIMIT);
         assert!(search_queries.len() > 0);
         let random_query = search_queries.choose(&mut rng).unwrap();
         let index_name = (*index_name).as_ref();
         let random_documents = docs.into_iter().choose_multiple(&mut rng, random_limit);
-        match rng.gen_range(0_u32, 8) {
+        let begin_time = Instant::now();
+        let response = match rng.gen_range(0_u32, 8) {
             0 => self.get_indexes().await,
             1 => self.get_document(index_name, &random_doc_idx.to_string()).await,
-            2 => self.get_documents_batch(index_name, random_doc_idx, random_limit).await,
+            2 => self.get_documents_batch(index_name,  rng.gen_range(0, (doc_idx_range.1 - doc_idx_range.0) / 2), random_limit).await,
             3 => self.add_or_update_documents(index_name, random_documents).await,
             4 => self.add_or_replace_documents(index_name, random_documents).await,
             5 => self.delete_document(index_name, &random_doc_idx.to_string()).await,
             6 => self.delete_documents(index_name, random_documents.iter().map(|doc| doc.id)).await,
             _ => self.search_document(index_name, random_query, random_limit).await
-        }    
+        }; 
+        match response {
+            Ok(response_str) => Ok((response_str, Instant::now() - begin_time)),
+            Err(e) => Err(e),
+        }
     }
 
-    pub async fn ping(&self) -> Result<String, Box<dyn Error>> {
-        self.get_indexes().await
+    pub async fn ping(&self, timeout: Duration) -> Result<bool, Box<dyn Error>> {
+        let health_resourse = self.base_url.join("health").unwrap();
+        let client = reqwest::Client::new();
+        let response = client.get(health_resourse)
+            .timeout(timeout)
+            .send()
+            .await?;
+        Ok( true )
+        // Self::handle_response(response, "HEALTH_CHECK", StatusCode::NO_CONTENT)
+        //     .await?  
+        // if let serde_json::Value::Bool(health) = response_json.get("/health").unwrap() {
+        //     Ok(*health)
+        // } else {
+        //     Ok(false)
+        // }
     }
 
-    pub async fn purge(&self) -> Result<String, Box<dyn Error>> {
+    pub async fn purge(&self) -> Result<serde_json::Value, Box<dyn Error>> {
         let indexes : Vec<Index> = reqwest::get(self.indexes_resourse.as_str()).await?.json().await?;
         let client = reqwest::Client::new();
         //let mut log = String::new();
@@ -81,7 +102,7 @@ impl Proxy {
             match response {
                 Ok(response) => {
                     match response.status() {
-                        StatusCode::NO_CONTENT => eprintln!("Deleted index: {}", index_name.uid).await,
+                        StatusCode::NO_CONTENT => eprintln!("Successfully queued index for delete: {}", index_name.uid).await,
                         StatusCode::NOT_FOUND => eprintln!("Cannot find index: {}", index_name.uid).await,
                         status_code => eprintln!("Unknown response {:?} from index: {}", status_code, index_name.uid).await
                     };
@@ -91,30 +112,47 @@ impl Proxy {
                 },
             }
         }
-        Ok( "".to_string() )
+        Ok( json!(serde_json::Value::Null) )
     }
 
     pub async fn stress_test<'a, 'b, I>(&'a self, (mut initial_data, documents): (I, usize), queries_number: u32) -> Result<StressTestResult, Box<dyn Error>>
     where I: Iterator<Item=Document<'b>> + Clone {
         let index_name = Arc::new(format!("stresstest_{}", chrono::Local::now().format("%v_%H-%M-%S")));
-        
+        eprintln!(" >>> Checking if Meilisearch is not responding").await;
+        self.ping(Duration::from_secs(5)).await?;
+
         eprintln!(" >>> Creating index: {}", index_name).await;
         self.add_index(&index_name, "id").await?;
 
         eprintln!(" >>> Pushing {} documents", documents).await;
         let initial_data_clone = initial_data.clone();
+        let mut update_ids = vec![];
         loop {
-            const CHUNK_SIZE: usize = 5000; 
+            const CHUNK_SIZE: usize = 3000; 
             let chunk = initial_data.clone().take(CHUNK_SIZE);
-            self.add_or_replace_documents(&index_name, chunk).await?;
-            print!("|").await;
+            let update_json = self.add_or_replace_documents(&index_name, chunk).await?;
+            if let Some(serde_json::Value::Number(update_id)) = update_json.get("updateId") {
+                update_ids.push(update_id.as_u64().unwrap());
+            }
+            eprint!(".").await;
             if initial_data.by_ref().skip(CHUNK_SIZE).next().is_none() { 
                 // bug: next() retrieves an element and it's discarded, instad of pushed to server
                 break;
             }
         }
-        
-        eprintln!("\n >>> Sending queries").await;
+        eprintln!("\n >>> Waiting for documents to be stored (long operation, ~10 secs per 10 000 documents)").await;
+        for update_id in update_ids {
+            loop {
+                match self.is_update_finished(&index_name, update_id).await {
+                    Ok(Some(true)) | Ok(None) => break,
+                    Ok(Some(false)) => async_std::task::sleep(std::time::Duration::from_millis(1000)).await,
+                    Err(e) => return Err(e),
+                }
+            }
+            eprint!(".").await;
+        }
+
+        eprintln!("\n >>> Sending {} queries", queries_number).await;
         let search_queries = ["indian dish", "vegetarian", "dry fruit", "fresh fish", "all-in-one", "chocolate", "sunflower oil"];
         let begin_time = Instant::now();
         let requests: Vec<_> = (0..queries_number)
@@ -122,21 +160,55 @@ impl Proxy {
             .collect();
 
         let requests_time = Instant::now() - begin_time;
-        eprintln!(" >>> Waiting for responses").await;
+        eprintln!(" >>> Waiting for {} responses (long operation, ~1 sec per 10 queries)", queries_number).await;
+        
+        let mut successful_responses = 0_u32;
+        let mut avg_duration = Duration::from_millis(0);
+        let begin_time = Instant::now();
         for (idx, result) in join_all(requests).await.iter().enumerate() {
-            if let Err(e) = result {
-                eprintln!("Query [{}] error: {}", idx + 1, e).await;
+            match result {
+                Ok((_, duration)) => {
+                    successful_responses += 1;
+                    avg_duration += *duration;
+                },
+                Err(e) => eprintln!("Query [{}] error: {}", idx + 1, e).await,
             }
         }
+
+        // Sequential wait (slower, but prettier output)
+        // let mut requests_cnt = 0_usize;
+        // for request in requests {
+        //     requests_cnt += 1;
+        //     eprintln!("\rQuery [{}/{}]", requests_cnt, queries).await;
+        //     if let Err(e) = request.await {
+        //         eprintln!("Query [{}] error: {}", requests_cnt, e).await;
+        //     }
+        // }
+
         let response_time = Instant::now() - begin_time;
 
         Ok( StressTestResult {
             all_queries_send_time_ms: requests_time.as_millis(),
             all_queries_receive_time_ms: response_time.as_millis(),
+            avg_response_time: (avg_duration / successful_responses).as_millis(),
         } )
     }
 
-    pub async fn add_index(&self, name: &str, primary_key_name: &str) -> Result<String, Box<dyn Error>> {
+    pub async fn is_update_finished(&self, index_name: &str, update_id: u64) -> Result<Option<bool>, Box<dyn Error>> {
+        let update_resourse = self.indexes_resourse
+            .join(&format!("{}/updates/", index_name)).unwrap()
+            .join(&update_id.to_string()).unwrap();
+        let response = reqwest::get(update_resourse)
+            .await;
+        let response_json = Self::handle_response(response, "IS_UPDATE_FINISHED", StatusCode::OK)
+            .await?;
+        match response_json.get("status") {
+            Some(serde_json::Value::String(value)) => Ok(Some(value == "processed")),
+            _ => Ok(None),
+        }
+    }
+
+    pub async fn add_index(&self, name: &str, primary_key_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
         let response = reqwest::Client::new()
             .post(self.indexes_resourse.as_str())
             .json(&json![{"uid": name, "primaryKey": primary_key_name}])
@@ -146,7 +218,7 @@ impl Proxy {
             .await
     }
 
-    pub async fn delete_index(&self, name: &str) -> Result<String, Box<dyn Error>> {
+    pub async fn delete_index(&self, name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
         let index_resourse = self.indexes_resourse.join(name).unwrap();
         let response = reqwest::Client::new()
             .delete(index_resourse)
@@ -156,14 +228,19 @@ impl Proxy {
             .await
     }
 
-    pub async fn get_indexes(&self) -> Result<String, Box<dyn Error>> {
-        let response = reqwest::get(self.indexes_resourse.as_str())
-            .await;
+    pub async fn get_indexes(&self) -> Result<serde_json::Value, Box<dyn Error>> {
+        let request_fut = reqwest::get(self.indexes_resourse.as_str());
+        // if let Some(timeout) = timeout {
+        //     let response = request_fut.timeout(timeout).await?;
+        //     return Self::handle_response(response, "LIST_INDEXES", StatusCode::OK)
+        //         .await
+        // }
+        let response = request_fut.await;
         Self::handle_response(response, "LIST_INDEXES", StatusCode::OK)
-            .await
+                .await
     }
 
-    pub async fn get_index(&self, name: &str) -> Result<String, Box<dyn Error>> {
+    pub async fn get_index(&self, name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
         let index_resourse = self.indexes_resourse.join(name).unwrap();
         let response = reqwest::get(index_resourse)
             .await;
@@ -171,7 +248,7 @@ impl Proxy {
             .await
     }
 
-    pub async fn search_document(&self, index: &str, query: &str, limit: usize) -> Result<String, Box<dyn Error>> {
+    pub async fn search_document(&self, index: &str, query: &str, limit: usize) -> Result<serde_json::Value, Box<dyn Error>> {
         let index_resourse = self.indexes_resourse.join(index).unwrap();
         let response = reqwest::Client::new()
             .get(index_resourse)
@@ -182,7 +259,7 @@ impl Proxy {
             .await
     }
 
-    pub async fn get_document(&self, index: &str, primary_key_val: &str) -> Result<String, Box<dyn Error>> {
+    pub async fn get_document(&self, index: &str, primary_key_val: &str) -> Result<serde_json::Value, Box<dyn Error>> {
         let doc_resourse = self.indexes_resourse
             .join(&format!("{}/documents/", index)).unwrap()
             .join(primary_key_val).unwrap();
@@ -192,7 +269,7 @@ impl Proxy {
             .await
     }
 
-    pub async fn get_documents_batch(&self, index: &str, offset: usize, limit: usize) -> Result<String, Box<dyn Error>> {
+    pub async fn get_documents_batch(&self, index: &str, offset: usize, limit: usize) -> Result<serde_json::Value, Box<dyn Error>> {
         let docs_resourse = self.indexes_resourse
             .join(&format!("{}/documents/", index)).unwrap();
         let response = reqwest::Client::new()
@@ -204,7 +281,7 @@ impl Proxy {
             .await
     }
 
-    pub async fn add_or_replace_documents<'a, I>(&self, index: &str, docs: I) -> Result<String, Box<dyn Error>>
+    pub async fn add_or_replace_documents<'a, I>(&self, index: &str, docs: I) -> Result<serde_json::Value, Box<dyn Error>>
     where I: IntoIterator<Item=Document<'a>>, I::IntoIter: Clone {
         let docs_resourse = self.indexes_resourse
             .join(&format!("{}/documents/", index)).unwrap();
@@ -217,7 +294,7 @@ impl Proxy {
             .await
     }
 
-    pub async fn add_or_update_documents<'a, I>(&self, index: &str, docs: I) -> Result<String, Box<dyn Error>>
+    pub async fn add_or_update_documents<'a, I>(&self, index: &str, docs: I) -> Result<serde_json::Value, Box<dyn Error>>
     where I: IntoIterator<Item=Document<'a>>, I::IntoIter: Clone{
         let docs_resourse = self.indexes_resourse
             .join(&format!("{}/documents/", index)).unwrap();
@@ -230,7 +307,7 @@ impl Proxy {
             .await
     }
 
-    pub async fn delete_document(&self, index: &str, primary_key_val: &str) -> Result<String, Box<dyn Error>> {
+    pub async fn delete_document(&self, index: &str, primary_key_val: &str) -> Result<serde_json::Value, Box<dyn Error>> {
         let doc_resourse = self.indexes_resourse
             .join(&format!("{}/documents/", index)).unwrap()
             .join(primary_key_val).unwrap();
@@ -242,7 +319,7 @@ impl Proxy {
             .await
     }
 
-    pub async fn delete_documents<'a, I>(&self, index: &'a str, docs_ids: I) -> Result<String, Box<dyn Error>> 
+    pub async fn delete_documents<'a, I>(&self, index: &'a str, docs_ids: I) -> Result<serde_json::Value, Box<dyn Error>> 
     where I: IntoIterator<Item=usize>, I::IntoIter: Clone  {
         let docs_batch_resourse = self.indexes_resourse
             .join(&format!("{}/documents/delete-batch", index)).unwrap();
@@ -255,7 +332,7 @@ impl Proxy {
             .await
     }
     
-    async fn handle_response(reqwest_result: Result<Response, reqwest::Error>, message_prefix: &'static str, expected_code: StatusCode) -> Result<String, Box<dyn Error>> {
+    async fn handle_response(reqwest_result: Result<Response, reqwest::Error>, message_prefix: &'static str, expected_code: StatusCode) -> Result<serde_json::Value, Box<dyn Error>> {
         match reqwest_result {
             Err(e) => { 
                 eprintln!("{} :: HTTP error: {:#?}", message_prefix, e).await;
@@ -267,7 +344,7 @@ impl Proxy {
                     let response_body = response.json().await?;
                     Err(Box::new(BadHttpStatusError { expected_code, received_code, response_body, method: message_prefix }))   
                 } else {
-                    Ok(response.text().await?)
+                    Ok(response.json().await?)
                 }
             },
         }
@@ -296,7 +373,7 @@ async fn test_meilisearch_actions() {
     let url = Url::parse("http://localhost:7700").unwrap();
     let proxy = Proxy::new(url);
     
-    assert!(proxy.ping().await.is_ok());
+    assert!(proxy.ping(Duration::from_secs(3)).await.is_ok());
 
     assert!(proxy.purge().await.is_ok());
 

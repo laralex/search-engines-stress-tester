@@ -10,7 +10,7 @@ edition = "2018"
 chrono = "0.4"
 url = "2.1"
 clap = "3.0.0-beta.1"
-tokio = { version = "0.2", features = ["macros", "blocking", "rt-core", "rt-threaded"] }
+tokio = { version = "0.2", features = ["macros", "blocking", "rt-core", "rt-threaded", "time"] }
 num = "0.3"
 reqwest = { version = "0.10", features = ["json"] }
 serde = "1.0"
