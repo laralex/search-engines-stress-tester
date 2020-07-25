@@ -26,14 +26,17 @@ pub struct StressTestParams<'a> {
 
 pub async fn handle_ping(engine: Engine) {
     eprintln!(" >>> Pinging {:?}", engine).await;
+    let timeout = Duration::from_secs(5);
     let ping_result = match engine {
-        Engine::Meilisearch(url) =>  meilisearch::Proxy::new(url).ping(Duration::from_secs(5)).await,
-        Engine::Typesense(url, _) => Ok(true as bool), //Ok(String::from("")),
+        Engine::Meilisearch(url) => 
+            meilisearch::Proxy::new(url).ping(timeout).await,
+        Engine::Typesense(url, api_key) => 
+            typesense::Proxy::new(url, api_key).ping(timeout).await, //Ok(String::from("")),
     };
     match ping_result {
-        Ok(true) => println!("Success!").await,
-        Ok(false) => println!("Engine's health check failed!").await,
-        Err(e) => println!("HTTP request error: {:#?}", e).await,
+        Ok(true) => println!("Success! Engine's <health> is <true>").await,
+        Ok(false) => println!("Engine's <health> is <false>!").await,
+        Err(e) => println!("Error occured! {:#?}", e).await,
     }
 }
 
@@ -41,7 +44,7 @@ pub async fn handle_purge(engine: Engine) {
     eprintln!(" >>> Purging all the data from {:?}", engine).await;
     let purge_result = match engine {
         Engine::Meilisearch(url) => meilisearch::Proxy::new(url).purge().await,
-        Engine::Typesense(url, api_key) => Ok(json!({}))//typesense::purge(url, api_key).await,
+        Engine::Typesense(url, api_key) => typesense::Proxy::new(url, api_key).purge().await,//typesense::purge(url, api_key).await,
     };
     match purge_result {
         Err(e) => println!(" >>> HTTP request error: {:#?}", e).await,
@@ -65,20 +68,22 @@ pub async fn handle_stress_test<'a>(engine: Engine, stress_params: StressTestPar
         .cycle()
         .take(stress_params.initial_documents)
         .enumerate()
-        .map(|(idx, doc)| Document { id: idx + 1, doc: &doc});
+        .map(|(idx, doc)| Document { id: (idx + 1).to_string(), doc: &doc, dummy: idx as i32,});
     
-    match engine {
-        Engine::Meilisearch(url) => { 
-            let test_result = meilisearch::Proxy::new(url)
-                .stress_test((extended_data, stress_params.initial_documents), stress_params.queries_total).await;
-            match test_result {
-                Ok(time) => println!(" >>> Stress testing is done:\nTest took: {} ms", // \nAverage time to get a response: {} ms 
-                    time.all_queries_receive_time_ms).await,
-                Err(e) => println!(" >>> Stress test finished with error!\n{:#?}", e).await,
-            }
-        },
-        Engine::Typesense(url, api_key) => (),
+    let test_result = match engine {
+        Engine::Meilisearch(url) => meilisearch::Proxy::new(url)
+                .stress_test((extended_data, stress_params.initial_documents), stress_params.queries_total).await,
+        Engine::Typesense(url, api_key) => typesense::Proxy::new(url, api_key)
+            .stress_test((extended_data, stress_params.initial_documents), stress_params.queries_total).await,
     };
+    match test_result {
+        Ok(time) => println!(" >>> Stress testing is done:\nTest took: {} ms\nIncluding sending queries: {} ms\nIncluding waiting for responses: {} ms\nIncluding waiting for updates to finish: {} ms", // \nAverage time to get a response: {} ms 
+            time.all_queries_send_time_ms + time.all_queries_receive_time_ms + time.all_updates_commited_time_ms,
+            time.all_queries_send_time_ms,
+            time.all_queries_receive_time_ms,
+            time.all_updates_commited_time_ms).await,
+        Err(e) => println!(" >>> Stress test finished with error!\n{:#?}", e).await,
+    }
 }
 
 

@@ -1,7 +1,17 @@
+use reqwest::StatusCode;
 use csv::ReaderBuilder;
-use serde::{Deserialize, Serialize, de::Deserializer};
+use serde::{Deserialize, Serialize, de::Deserializer, ser::Serializer};
 
+use std::fmt::{Display, Formatter};
 use std::path::Path;
+use itertools::Itertools;
+
+pub struct StressTestResult {
+    pub all_queries_send_time_ms: u128,
+    pub all_queries_receive_time_ms: u128,
+    pub all_updates_commited_time_ms: u128,
+    pub avg_response_time: u128,
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CsvDocument {
@@ -13,11 +23,31 @@ pub struct CsvDocument {
     url: String,
 }
 
+
 #[derive(Serialize, Clone)]
 pub struct Document<'a> {
-    pub id: usize,
+    pub id: String,
     #[serde(flatten)]
     pub doc: &'a CsvDocument,
+    pub dummy: i32,
+}
+
+pub struct TypesenseDocuments<'a, I: Iterator<Item=Document<'a>> + Clone>(pub I);
+impl<'a, I: Iterator<Item=Document<'a>> + Clone> Serialize for TypesenseDocuments<'a, I> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        self.0.clone()
+            .map(|doc| serde_json::json!(doc))
+            .join("\n")
+            .serialize::<_>(serializer)
+    }
+    
+} 
+
+impl<'a, I: Iterator<Item=Document<'a>> + Clone> Display for TypesenseDocuments<'a, I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        self.serialize(f)
+    }
 }
 
 fn deserialize_lossy<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
@@ -35,6 +65,8 @@ impl<T, I> Serialize for SerializeIterator<T, I> where I: Iterator<Item=T> + Clo
         serializer.collect_seq(self.0.clone())
     }
 }
+
+
 
 pub fn load_test_data(path: &Path) -> Result<Vec<CsvDocument>, csv::Error> {
     let mut reader = ReaderBuilder::new()
@@ -58,3 +90,20 @@ pub fn load_test_data(path: &Path) -> Result<Vec<CsvDocument>, csv::Error> {
     //     .for_each(|(idx, &mut e)| e.id = idx + 1);
     Ok(data)
 }
+
+#[derive(Debug)]
+pub struct BadHttpStatusError {
+    pub expected_code: StatusCode,
+    pub received_code: StatusCode,
+    pub response_body: serde_json::Value,
+    pub method: &'static str,
+}
+
+impl Display for BadHttpStatusError {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "Query type {} responded with unexpected HTTP code: \"{}\" expected, \"{}\" received", 
+            self.method, self.expected_code, self.received_code) // user-facing output
+    }
+}
+
+impl std::error::Error for BadHttpStatusError {}
