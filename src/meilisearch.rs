@@ -1,7 +1,7 @@
 
 use serde::Deserialize;
 use serde_json::{json};
-use reqwest::{StatusCode, Url, Response};
+use reqwest::{StatusCode, Url, Response, header::HeaderMap};
 use rand::seq::{SliceRandom, IteratorRandom};
 use rand::Rng;
 use futures::prelude::*;
@@ -32,15 +32,23 @@ struct Update
 
 pub struct Proxy { 
     pub base_url: Url,
+    // pub firebase_token: Option<String>,
     indexes_resourse: Url,
+    common_headers: HeaderMap,
 }
 
 impl Proxy {
-    pub fn new(base_url: Url) -> Self {
+    pub fn new(base_url: Url, firebase_token: Option<String>) -> Self {
         let indexes_resourse = (&base_url).join("indexes/").unwrap();
+        let mut common_headers = HeaderMap::new();
+        if let Some(token) = firebase_token {
+            common_headers.append("X-FIREBASE-TOKEN", token.parse().unwrap());
+        }
         Self {
             base_url,
+            // firebase_token,
             indexes_resourse,
+            common_headers,
         }
     }
 
@@ -215,7 +223,10 @@ impl Proxy {
         let update_resourse = self.indexes_resourse
             .join(&format!("{}/updates/", index_name)).unwrap()
             .join(&update_id.to_string()).unwrap();
-        let response = reqwest::get(update_resourse)
+        let response = reqwest::Client::new()
+            .get(update_resourse)
+            .headers(self.common_headers.clone())
+            .send()
             .await;
         let response_json = Self::handle_response(response, "IS_UPDATE_FINISHED", StatusCode::OK)
             .await?;
@@ -228,6 +239,7 @@ impl Proxy {
     pub async fn add_index(&self, name: &str, primary_key_name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
         let response = reqwest::Client::new()
             .post(self.indexes_resourse.as_str())
+            .headers(self.common_headers.clone())
             .json(&json![{"uid": name, "primaryKey": primary_key_name}])
             .send()
             .await;
@@ -239,6 +251,7 @@ impl Proxy {
         let index_resourse = self.indexes_resourse.join(name).unwrap();
         let response = reqwest::Client::new()
             .delete(index_resourse)
+            .headers(self.common_headers.clone())
             .send()
             .await;
         Self::handle_response_forward(response, "DELETE_INDEX", StatusCode::NO_CONTENT)
@@ -247,20 +260,26 @@ impl Proxy {
     }
 
     pub async fn get_indexes(&self) -> Result<serde_json::Value, Box<dyn Error>> {
-        let request_fut = reqwest::get(self.indexes_resourse.as_str());
+        let response = reqwest::Client::new()
+            .get(self.indexes_resourse.as_str())
+            .headers(self.common_headers.clone())
+            .send()
+            .await;
         // if let Some(timeout) = timeout {
         //     let response = request_fut.timeout(timeout).await?;
         //     return Self::handle_response(response, "LIST_INDEXES", StatusCode::OK)
         //         .await
         // }
-        let response = request_fut.await;
         Self::handle_response(response, "LIST_INDEXES", StatusCode::OK)
                 .await
     }
 
     pub async fn get_index(&self, name: &str) -> Result<serde_json::Value, Box<dyn Error>> {
         let index_resourse = self.indexes_resourse.join(name).unwrap();
-        let response = reqwest::get(index_resourse)
+        let response = reqwest::Client::new()
+            .get(index_resourse)
+            .headers(self.common_headers.clone())
+            .send()
             .await;
         Self::handle_response(response, "GET_INDEX", StatusCode::OK)
             .await
@@ -271,6 +290,7 @@ impl Proxy {
             .join(&format!("{}/search", index)).unwrap();
         let response = reqwest::Client::new()
             .get(index_resourse)
+            .headers(self.common_headers.clone())
             .query(&[("q", query), ("limit", &limit.to_string())])
             .send()
             .await;
@@ -282,7 +302,10 @@ impl Proxy {
         let doc_resourse = self.indexes_resourse
             .join(&format!("{}/documents/", index)).unwrap()
             .join(primary_key_val).unwrap();
-        let response = reqwest::get(doc_resourse)
+        let response = reqwest::Client::new()
+            .get(doc_resourse)
+            .headers(self.common_headers.clone())
+            .send()
             .await;
         Self::handle_response(response, "GET_DOC", StatusCode::OK)
             .await
@@ -293,6 +316,7 @@ impl Proxy {
             .join(&format!("{}/documents/", index)).unwrap();
         let response = reqwest::Client::new()
             .get(docs_resourse)
+            .headers(self.common_headers.clone())
             .query(&[("offset", &offset.to_string()), ("limit", &limit.to_string())])
             .send()
             .await;
@@ -306,6 +330,7 @@ impl Proxy {
             .join(&format!("{}/documents/", index)).unwrap();
         let response = reqwest::Client::new()
             .post(docs_resourse)
+            .headers(self.common_headers.clone())
             .json(&SerializeIterator(docs.into_iter()))
             .send()
             .await;
@@ -319,6 +344,7 @@ impl Proxy {
             .join(&format!("{}/documents/", index)).unwrap();
         let response = reqwest::Client::new()
             .put(docs_resourse)
+            .headers(self.common_headers.clone())
             .json(&SerializeIterator(docs.into_iter()))
             .send()
             .await;
@@ -332,6 +358,7 @@ impl Proxy {
             .join(primary_key_val).unwrap();
         let response = reqwest::Client::new()
             .delete(doc_resourse)
+            .headers(self.common_headers.clone())
             .send()
             .await;
         Self::handle_response(response, "DELETE_DOC", StatusCode::ACCEPTED)
@@ -344,6 +371,7 @@ impl Proxy {
             .join(&format!("{}/documents/delete-batch", index)).unwrap();
         let response = reqwest::Client::new()
             .post(docs_batch_resourse)
+            .headers(self.common_headers.clone())
             .json(&SerializeIterator(docs_ids.into_iter()))
             .send()
             .await;
@@ -353,7 +381,10 @@ impl Proxy {
 
     pub async fn get_all_updates(&self, index: &str) -> Result<serde_json::Value, Box<dyn Error>> {
         let updates_resourse = self.indexes_resourse.join(&format!("{}/updates", index)).unwrap();
-        let response = reqwest::get(updates_resourse)
+        let response = reqwest::Client::new()
+            .get(updates_resourse)
+            .headers(self.common_headers.clone())
+            .send()
             .await;
         Self::handle_response(response, "WAIT_ALL_UPDATES", StatusCode::OK)
             .await
@@ -388,7 +419,7 @@ impl Proxy {
 #[tokio::test]
 async fn test_meilisearch_actions() {
     let url = Url::parse("http://localhost:7700").unwrap();
-    let proxy = Proxy::new(url);
+    let proxy = Proxy::new(url, Some("eyJhbGciOiJSUzI1NiIsImtpZCI6IjU1NGE3NTQ3Nzg1ODdjOTRjMTY3M2U4ZWEyNDQ2MTZjMGMwNDNjYmMiLCJ0eXAiOiJKV1QifQ.eyJuYW1lIjoic2VydmljZXJlZ2lzdHJhdGlvMSIsInBpY3R1cmUiOiJodHRwOi8vd3d3LmV4YW1wbGUuY29tLzEyMzQ1Njc4L3Bob3RvLnBuZyIsImlzcyI6Imh0dHBzOi8vc2VjdXJldG9rZW4uZ29vZ2xlLmNvbS9icmluZGF2YW4tYzYxYjciLCJhdWQiOiJicmluZGF2YW4tYzYxYjciLCJhdXRoX3RpbWUiOjE1OTU5NDY1NDMsInVzZXJfaWQiOiJlY09ocjVyc2dWT1J5TkJCODRKTzNyd1VBZWwyIiwic3ViIjoiZWNPaHI1cnNnVk9SeU5CQjg0Sk8zcndVQWVsMiIsImlhdCI6MTU5NTk0NjU0MywiZXhwIjoxNTk1OTUwMTQzLCJlbWFpbCI6InNlcnZpY2VyZWdpc3RyYXRpbzFAYWJjLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjpmYWxzZSwiZmlyZWJhc2UiOnsiaWRlbnRpdGllcyI6eyJlbWFpbCI6WyJzZXJ2aWNlcmVnaXN0cmF0aW8xQGFiYy5jb20iXX0sInNpZ25faW5fcHJvdmlkZXIiOiJwYXNzd29yZCJ9fQ.mog-lpAps8Efw3MXOvCpEWU_2LZ_1CfSu9xypMCH6EZ0bd-JxaodALqil2dIvbNjbPaEt_oTojvniHKD1WdBy4ISBJ9y9k5Nk-7AxozIhqnuNZU6R7d70zSP5leVRTPcPXg7LKRvw2BD__nZBmHszCsYJIznNDFnGPJI3RgjrRv4eUCwM6et0QsV8_c5sd-4DRNDi9Kdgzbrcdpaj_jFYDyovfbLUAAsfK_Oi9GhyyqUizmnsslwLSn8x1-qMT439QU_pNAg59BJp012xlFuRrppkJx35W8QCdrgoZpoRDZEj6ZgG3v3tLInu7pAK6J4hNtp6j5WuPJzXFj60LHBbA".into()));
     
     assert!(proxy.ping(Duration::from_secs(3)).await.is_ok());
 

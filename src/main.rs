@@ -83,10 +83,15 @@ fn parse_args() -> ArgMatches {
             .short('d')
             .long("test-data")
             .required_unless("alternative_action")
-            //.required_if("alternative_action", "")
             .value_name("PATH")
             .takes_value(true)
             .about("Path to a CSV file with stress test data. It will be duplicated up to required size."))
+        .arg(Arg::with_name("firebase_token")
+            .short('f')
+            .long("firebase-token")
+            .value_name("STRING")
+            .takes_value(true)
+            .about("Firebase token to send in header of requests"))
         .get_matches()
 }
 #[tokio::main]
@@ -102,12 +107,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("Engine Port is not a number")))
         .expect("Engine Port is an invalid port number");
         
+    
+    let firebase_token = matches.value_of("firebase-token")
+        .and_then(|s| s.parse().ok());
+
     let engine = match matches.value_of("engine") {
-        Some("meilisearch") => actions::Engine::Meilisearch(engine_url),
-        Some("typesense") => actions::Engine::Typesense(engine_url, 
+        Some("meilisearch") => actions::Engine::Meilisearch(engine_url, firebase_token),
+        Some("typesense") => actions::Engine::Typesense(
+            engine_url,
             matches.value_of("api_key")
                 .expect("Improper config: typesense API key")
-                .to_owned()),
+                .to_owned(),
+            firebase_token),
         _ => panic!("Improper config: engine"),
     };
 

@@ -68,10 +68,13 @@ pub struct Proxy {
 }
 
 impl Proxy {
-    pub fn new(base_url: Url, api_key: String) -> Self {
+    pub fn new(base_url: Url, api_key: String, firebase_token: Option<String>) -> Self {
         let collections_resourse = (&base_url).join("collections/").unwrap();
         let mut common_headers = HeaderMap::new();
         common_headers.append("X-TYPESENSE-API-KEY", api_key.parse().unwrap());
+        if let Some(token) = firebase_token {
+            common_headers.append("X-FIREBASE-TOKEN", token.parse().unwrap());
+        }
         Self {
             base_url,
             collections_resourse,
@@ -368,7 +371,8 @@ impl Proxy {
 #[tokio::test]
 async fn test_typesense_actions() {
     let url = Url::parse("http://localhost:8108").unwrap();
-    let proxy = Proxy::new(url, "ABCD".to_string());
+    let proxy = Proxy::new(url, "ABCD".to_string(),
+        Some("eyJhbGciOiJSUzI1NiIsImtpZCI6IjU1NGE3NTQ3Nzg1ODdjOTRjMTY3M2U4ZWEyNDQ2MTZjMGMwNDNjYmMiLCJ0eXAiOiJKV1QifQ.eyJuYW1lIjoic2VydmljZXJlZ2lzdHJhdGlvMSIsInBpY3R1cmUiOiJodHRwOi8vd3d3LmV4YW1wbGUuY29tLzEyMzQ1Njc4L3Bob3RvLnBuZyIsImlzcyI6Imh0dHBzOi8vc2VjdXJldG9rZW4uZ29vZ2xlLmNvbS9icmluZGF2YW4tYzYxYjciLCJhdWQiOiJicmluZGF2YW4tYzYxYjciLCJhdXRoX3RpbWUiOjE1OTU5NDY1NDMsInVzZXJfaWQiOiJlY09ocjVyc2dWT1J5TkJCODRKTzNyd1VBZWwyIiwic3ViIjoiZWNPaHI1cnNnVk9SeU5CQjg0Sk8zcndVQWVsMiIsImlhdCI6MTU5NTk0NjU0MywiZXhwIjoxNTk1OTUwMTQzLCJlbWFpbCI6InNlcnZpY2VyZWdpc3RyYXRpbzFAYWJjLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjpmYWxzZSwiZmlyZWJhc2UiOnsiaWRlbnRpdGllcyI6eyJlbWFpbCI6WyJzZXJ2aWNlcmVnaXN0cmF0aW8xQGFiYy5jb20iXX0sInNpZ25faW5fcHJvdmlkZXIiOiJwYXNzd29yZCJ9fQ.mog-lpAps8Efw3MXOvCpEWU_2LZ_1CfSu9xypMCH6EZ0bd-JxaodALqil2dIvbNjbPaEt_oTojvniHKD1WdBy4ISBJ9y9k5Nk-7AxozIhqnuNZU6R7d70zSP5leVRTPcPXg7LKRvw2BD__nZBmHszCsYJIznNDFnGPJI3RgjrRv4eUCwM6et0QsV8_c5sd-4DRNDi9Kdgzbrcdpaj_jFYDyovfbLUAAsfK_Oi9GhyyqUizmnsslwLSn8x1-qMT439QU_pNAg59BJp012xlFuRrppkJx35W8QCdrgoZpoRDZEj6ZgG3v3tLInu7pAK6J4hNtp6j5WuPJzXFj60LHBbA".into()));
     
     assert!(proxy.ping(Duration::from_secs(3)).await.is_ok());
 
