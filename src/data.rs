@@ -6,11 +6,23 @@ use std::fmt::{Display, Formatter};
 use std::path::Path;
 use itertools::Itertools;
 
+#[derive(Debug, Clone)]
+pub struct StressTestParams<'a> {
+    pub queries_total: u32,
+    pub initial_documents: usize,
+    // pub threads_number: u16,
+    pub data_path: &'a Path,
+    pub test_existing_index: Option<String>,
+    pub no_wait_after_updates: bool,
+    pub no_update_queries: bool,
+}
+
 pub struct StressTestResult {
     pub all_queries_send_time_ms: u128,
     pub all_queries_receive_time_ms: u128,
     pub all_updates_commited_time_ms: u128,
-    pub avg_response_time: u128,
+    pub avg_success_response_time: u128,
+    pub successful_responses: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

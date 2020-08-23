@@ -8,20 +8,12 @@ use std::path::Path;
 
 use super::meilisearch;
 use super::typesense;
-use crate::data::{Document};
+use crate::data::{Document, StressTestParams};
 
 #[derive(Debug, Clone)]
 pub enum Engine {
     Meilisearch(Url, Option<String>), // url + firebase-token
     Typesense(Url, String, Option<String>), // url + api-key + firebase-token
-}
-
-#[derive(Debug, Clone)]
-pub struct StressTestParams<'a> {
-    pub queries_total: u32,
-    pub initial_documents: usize,
-    // pub threads_number: u16,
-    pub data_path: &'a Path,
 }
 
 pub async fn handle_ping(engine: Engine) {
@@ -55,6 +47,7 @@ pub async fn handle_purge(engine: Engine) {
 pub async fn handle_stress_test<'a>(engine: Engine, stress_params: StressTestParams<'a>) {
     assert!(stress_params.queries_total != 0, "Given queries number is 0");
     //assert!(stress_params.bytes_total != 0, "Given bytes number is 0");
+    
     eprint!(" >>> Loading test data ... ").await;
     let test_data = match crate::data::load_test_data(stress_params.data_path) {
         Ok(data) => data,
@@ -70,18 +63,39 @@ pub async fn handle_stress_test<'a>(engine: Engine, stress_params: StressTestPar
         .enumerate()
         .map(|(idx, doc)| Document { id: (idx + 1).to_string(), doc: &doc, dummy: idx as i32,});
     
+    let queries_total = stress_params.queries_total;
     let test_result = match engine {
         Engine::Meilisearch(url, firebase_token) => meilisearch::Proxy::new(url, firebase_token)
-                .stress_test((extended_data, stress_params.initial_documents), stress_params.queries_total).await,
+                .stress_test(extended_data, stress_params).await,
         Engine::Typesense(url, api_key, firebase_token) => typesense::Proxy::new(url, api_key, firebase_token)
-            .stress_test((extended_data, stress_params.initial_documents), stress_params.queries_total).await,
+            .stress_test(extended_data, stress_params).await,
     };
+
+    // let test_result = if let Some(index_name) = stress_params.test_existing_index.clone() {
+    //     match engine {
+    //         Engine::Meilisearch(url, firebase_token) => meilisearch::Proxy::new(url, firebase_token)
+    //                 .stress_test_existing_index(index_name.as_str(), (extended_data, stress_params.initial_documents), stress_params.queries_total).await,
+    //         Engine::Typesense(url, api_key, firebase_token) => typesense::Proxy::new(url, api_key, firebase_token)
+    //             .stress_test_existing_collection(index_name.as_str(), (extended_data, stress_params.initial_documents), stress_params.queries_total).await,
+    //     }
+    // } else {
+    //     match engine {
+    //         Engine::Meilisearch(url, firebase_token) => meilisearch::Proxy::new(url, firebase_token)
+    //                 .stress_test((extended_data, stress_params.initial_documents), stress_params.queries_total).await,
+    //         Engine::Typesense(url, api_key, firebase_token) => typesense::Proxy::new(url, api_key, firebase_token)
+    //             .stress_test((extended_data, stress_params.initial_documents), stress_params.queries_total).await,
+    //     }
+    // };
+    
     match test_result {
-        Ok(time) => println!(" >>> Stress testing is done:\nTest took: {} ms\nIncluding sending queries: {} ms\nIncluding waiting for responses: {} ms\nIncluding waiting for updates to finish: {} ms", // \nAverage time to get a response: {} ms 
-            time.all_queries_send_time_ms + time.all_queries_receive_time_ms + time.all_updates_commited_time_ms,
-            time.all_queries_send_time_ms,
-            time.all_queries_receive_time_ms,
-            time.all_updates_commited_time_ms).await,
+        Ok(stat) => println!(" >>> Stress testing is done:\nTest took: {} ms\nIncluding sending queries: {} ms\nIncluding waiting for responses: {} ms\nIncluding waiting for updates to finish: {} ms\nAverage successful response time: {} ms\nSuccessful responses: {} out of {}", // \nAverage time to get a response: {} ms 
+        stat.all_queries_send_time_ms + stat.all_queries_receive_time_ms + stat.all_updates_commited_time_ms,
+        stat.all_queries_send_time_ms,
+        stat.all_queries_receive_time_ms,
+        stat.all_updates_commited_time_ms,
+        stat.avg_success_response_time,
+        stat.successful_responses,
+        queries_total).await,
         Err(e) => println!(" >>> Stress test finished with error!\n{:#?}", e).await,
     }
 }

@@ -82,10 +82,20 @@ fn parse_args() -> ArgMatches {
         .arg(Arg::with_name("test_data_path")
             .short('d')
             .long("test-data")
-            .required_unless("alternative_action")
+            .required_unless_one(&["alternative_action"])
             .value_name("PATH")
             .takes_value(true)
             .about("Path to a CSV file with stress test data. It will be duplicated up to required size."))
+        .arg(Arg::with_name("on_existing_index")
+            .long("existing-index")
+            //.conflicts_with_all(&["test_data_path", "initial_documents"])
+            .value_name("INDEX_NAME")
+            .takes_value(true)
+            .about("Use this preexisting index (Meili) or collection (Typesense), don't push data to it again"))
+        .arg(Arg::with_name("no_wait_after_updates")
+            .long("nowait-after")
+            //.conflicts_with_all(&["test_data_path", "initial_documents"])
+            .about("No wait after receiving all responses on queries (i.e. waiting for all updates to finish)"))
         .arg(Arg::with_name("firebase_token")
             .short('f')
             .long("firebase-token")
@@ -108,8 +118,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Engine Port is an invalid port number");
         
     
-    let firebase_token = matches.value_of("firebase-token")
+    let firebase_token = matches.value_of("firebase_token")
         .and_then(|s| s.parse().ok());
+
+    //eprintln!("Firebase token: {:?}", firebase_token);
 
     let engine = match matches.value_of("engine") {
         Some("meilisearch") => actions::Engine::Meilisearch(engine_url, firebase_token),
@@ -125,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match matches.value_of("alternative_action") {
         Some("ping") => actions::handle_ping(engine).await,
         Some("PURGE") => actions::handle_purge(engine).await,
-        None => actions::handle_stress_test(engine, actions::StressTestParams {
+        None => actions::handle_stress_test(engine, data::StressTestParams {
             queries_total: matches.value_of("queries_total")
                 .expect("Improper config: queries")
                 .parse()
@@ -154,6 +166,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 path
             },
+            test_existing_index: matches.value_of("on_existing_index")
+                .and_then(|index_name| Some(index_name.into())),
+            no_update_queries: false,
+            no_wait_after_updates: matches.is_present("no_wait_after_updates"),
         })
         .await,
         _ => panic!("Improper config: alternative action")

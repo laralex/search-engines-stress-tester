@@ -155,51 +155,59 @@ impl Proxy {
         Ok( json!(serde_json::Value::Null) )
     }
 
-    pub async fn stress_test<'a, 'b, I>(&'a self, (mut initial_data, documents): (I, usize), queries_number: u32) -> Result<StressTestResult, Box<dyn Error>>
+    pub async fn stress_test<'a, 'b, I>(&'a self, mut initial_data: I, test_params: StressTestParams<'a>) -> Result<StressTestResult, Box<dyn Error>>
     where I: Iterator<Item=Document<'b>> + Clone {
-        let collection_name = Arc::new(format!("stresstest_{}", chrono::Local::now().format("%v_%H-%M-%S")));
+        
         eprintln!(" >>> Checking if Typesense is not responding").await;
         self.ping(Duration::from_secs(5)).await?;
-
-        eprintln!(" >>> Creating collection: {}", collection_name).await;
-        let test_collection_fields = vec![
-            CollectionField::new_facet("id", "string"),
-            CollectionField::new("title", "string"),
-            CollectionField::new("price_str", "string"),
-            CollectionField::new_facet("thumbnail_path", "string"),
-            CollectionField::new("about", "string"),
-            CollectionField::new_facet("url", "string"),
-            CollectionField::new_facet("dummy", "int32"),
-        ];
-        self.add_collection(&collection_name, test_collection_fields,Some("dummy")).await?;
-
-        eprintln!(" >>> Pushing {} documents", documents).await;
+        
         let initial_data_clone = initial_data.clone();
-        let mut update_ids = vec![];
-        loop {
-            const CHUNK_SIZE: usize = 1500; 
-            let chunk = initial_data.clone().take(CHUNK_SIZE);
-            let update_json = self.import_documents(&collection_name, chunk).await?;
-            if let Some(serde_json::Value::Number(update_id)) = update_json.get("updateId") {
-                update_ids.push(update_id.as_u64().unwrap());
-            }
-            eprint!(".").await;
-            if initial_data.by_ref().skip(CHUNK_SIZE).next().is_none() { 
-                // bug: next() retrieves an element and it's discarded, instad of pushed to server
-                break;
+        
+        let collection_name;
+        if let Some(collection_name_ref) = test_params.test_existing_index.as_ref() {
+            collection_name = Arc::new(collection_name_ref.to_owned());
+        } else { 
+            collection_name = Arc::new(format!("stresstest_{}", chrono::Local::now().format("%v_%H-%M-%S")));
+
+            eprintln!(" >>> Creating collection: {}", collection_name).await;
+            let test_collection_fields = vec![
+                CollectionField::new_facet("id", "string"),
+                CollectionField::new("title", "string"),
+                CollectionField::new("price_str", "string"),
+                CollectionField::new_facet("thumbnail_path", "string"),
+                CollectionField::new("about", "string"),
+                CollectionField::new_facet("url", "string"),
+                CollectionField::new_facet("dummy", "int32"),
+            ];
+            self.add_collection(&collection_name, test_collection_fields,Some("dummy")).await?;
+
+            eprintln!(" >>> Pushing {} documents", test_params.initial_documents).await;
+            let mut update_ids = vec![];
+            loop {
+                const CHUNK_SIZE: usize = 1500; 
+                let chunk = initial_data.clone().take(CHUNK_SIZE);
+                let update_json = self.import_documents(&collection_name, chunk).await?;
+                if let Some(serde_json::Value::Number(update_id)) = update_json.get("updateId") {
+                    update_ids.push(update_id.as_u64().unwrap());
+                }
+                eprint!(".").await;
+                if initial_data.by_ref().skip(CHUNK_SIZE).next().is_none() { 
+                    // bug: next() retrieves an element and it's discarded, instad of pushed to server
+                    break;
+                }
             }
         }
 
-        eprintln!("\n >>> Sending {} queries", queries_number).await;
+        eprintln!("\n >>> Sending {} queries", test_params.queries_total).await;
         let search_queries = ["indian dish", "vegetarian", "dry fruit", "fresh fish", "all-in-one", "chocolate", "sunflower oil"];
         let search_by_fields = vec!["title", "about", "price_str", "url", "thumbnail_path", "id"];
         let begin_time = Instant::now();
-        let requests: Vec<_> = (0..queries_number)
-            .map(|_| self.make_random_query(collection_name.clone(), (1, documents), initial_data_clone.clone(), &search_queries, &search_by_fields))
+        let requests: Vec<_> = (0..test_params.queries_total)
+            .map(|_| self.make_random_query(collection_name.clone(), (1, test_params.initial_documents), initial_data_clone.clone(), &search_queries, &search_by_fields))
             .collect();
 
         let requests_time = Instant::now() - begin_time;
-        eprintln!(" >>> Waiting for {} responses (might be long operation)", queries_number).await;
+        eprintln!(" >>> Waiting for {} responses (long operation)", test_params.queries_total).await;
         
         let mut successful_responses = 0_u32;
         let mut avg_duration = Duration::from_millis(0);
@@ -230,7 +238,8 @@ impl Proxy {
             all_queries_send_time_ms: requests_time.as_millis(),
             all_queries_receive_time_ms: response_time.as_millis(),
             all_updates_commited_time_ms: 0,
-            avg_response_time: (avg_duration / successful_responses).as_millis(),
+            avg_success_response_time: (avg_duration / successful_responses).as_millis(),
+            successful_responses,
         } )
     }
 
